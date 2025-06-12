@@ -1,0 +1,459 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>物流配送车货物自动规划系统</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+    <style>
+        body {
+            margin: 0;
+            font-family: 'Microsoft YaHei', sans-serif;
+        }
+        .container {
+            display: flex;
+            height: 100vh;
+        }
+        .input-panel {
+            width: 300px;
+            padding: 20px;
+            background: #f5f5f5;
+            border-right: 1px solid #ddd;
+        }
+        .visualization {
+            flex: 1;
+            position: relative;
+        }
+        #canvas-container {
+            width: 100%;
+            height: 100%;
+        }
+        .form-group {
+            margin-bottom: 15px;
+        }
+        label {
+            display: block;
+            margin-bottom: 5px;
+            font-weight: bold;
+        }
+        input[type="number"] {
+            width: 100%;
+            padding: 8px;
+            margin-bottom: 10px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+        }
+        button {
+            width: 100%;
+            padding: 10px;
+            background: #4CAF50;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+        button:hover {
+            background: #45a049;
+        }
+        .items-list {
+            margin-top: 20px;
+            max-height: 300px;
+            overflow-y: auto;
+        }
+        .item-card {
+            background: white;
+            padding: 10px;
+            margin-bottom: 10px;
+            border-radius: 4px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="input-panel">
+            <h2>车厢尺寸设置</h2>
+            <div class="form-group">
+                <label for="containerLength">车厢长度 (厘米):</label>
+                <input type="number" id="containerLength" min="1" step="1" value="600">
+            </div>
+            <div class="form-group">
+                <label for="containerWidth">车厢宽度 (厘米):</label>
+                <input type="number" id="containerWidth" min="1" step="1" value="400">
+            </div>
+            <div class="form-group">
+                <label for="containerHeight">车厢高度 (厘米):</label>
+                <input type="number" id="containerHeight" min="1" step="1" value="250">
+            </div>
+            <button onclick="updateContainer()" style="margin-bottom: 20px;">更新车厢尺寸</button>
+
+            <h2>货物信息输入</h2>
+            <div class="form-group">
+                <label for="length">长度 (厘米):</label>
+                <input type="number" id="length" min="1" step="1">
+            </div>
+            <div class="form-group">
+                <label for="width">宽度 (厘米):</label>
+                <input type="number" id="width" min="1" step="1">
+            </div>
+            <div class="form-group">
+                <label for="height">高度 (厘米):</label>
+                <input type="number" id="height" min="1" step="1">
+            </div>
+            <button onclick="addItem()">添加货物</button>
+            
+            <div class="items-list" id="itemsList">
+                <h3>已添加货物列表</h3>
+            </div>
+        </div>
+        <div class="visualization">
+            <div id="canvas-container"></div>
+        </div>
+    </div>
+
+    <script>
+        let scene, camera, renderer;
+        let controls; // 添加控制器变量
+        let items = [];
+        let occupiedSpaces = [];
+        let container;
+        let itemMeshes = []; // 存储所有货物的网格对象
+
+        // 货车车厢尺寸（改为变量）
+        let CONTAINER_WIDTH = 400;
+        let CONTAINER_HEIGHT = 250;
+        let CONTAINER_LENGTH = 600;
+
+        let latestItemId = null; // 添加在全局变量区域
+
+        // 生成随机货物
+        function generateRandomItems() {
+            // 生成5-8个随机货物
+            const numItems = Math.floor(Math.random() * 4) + 5;
+            
+            for (let i = 0; i < numItems; i++) {
+                // 生成合理范围内的随机尺寸
+                const item = {
+                    length: Math.floor(Math.random() * 100) + 50, // 50-150cm
+                    width: Math.floor(Math.random() * 60) + 40,   // 40-100cm
+                    height: Math.floor(Math.random() * 40) + 30,  // 30-70cm
+                    id: Date.now() + i
+                };
+                
+                items.push(item);
+            }
+            repackAllItems();
+        }
+
+        // 对所有物品重新打包
+        function repackAllItems() {
+            itemMeshes.forEach(mesh => scene.remove(mesh));
+            itemMeshes = [];
+            occupiedSpaces = [];
+
+            // 按底面积从大到小和高度从低到高排序
+            items.sort((a, b) => {
+                const areaA = a.length * a.width;
+                const areaB = b.length * b.width;
+                if (Math.abs(areaA - areaB) > 100) { // 如果底面积差异较大，优先考虑底面积
+                    return areaB - areaA;
+                }
+                return a.height - b.height; // 底面积相近时，矮的先放
+            });
+
+            // 重新放置所有物品
+            const failedItems = [];
+            for (const item of items) {
+                if (!visualizeItem(item)) {
+                    failedItems.push(item);
+                }
+            }
+
+            // 移除无法放置的物品
+            if (failedItems.length > 0) {
+                items = items.filter(item => !failedItems.some(failedItem => failedItem.id === item.id));
+                if (failedItems.length === 1) {
+                    alert('1个货物由于空间限制无法放置，已自动移除');
+                } else {
+                    alert(`${failedItems.length}个货物由于空间限制无法放置，已自动移除`);
+                }
+            }
+
+            // 更新物品列表显示
+            updateItemsList();
+        }
+
+        // 初始化3D场景
+        function init() {
+            scene = new THREE.Scene();
+            camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+            renderer = new THREE.WebGLRenderer({ antialias: true }); // 添加抗锯齿
+            
+            const containerElement = document.getElementById('canvas-container');
+            renderer.setSize(containerElement.clientWidth, containerElement.clientHeight);
+            renderer.setClearColor(0xf0f0f0); // 设置背景色
+            containerElement.appendChild(renderer.domElement);
+
+            // 设置相机位置
+            camera.position.z = 800;
+            camera.position.y = 400;
+            camera.position.x = 500;
+            camera.lookAt(0, 0, 0);
+
+            // 添加轨道控制器
+            controls = new THREE.OrbitControls(camera, renderer.domElement);
+            controls.enableDamping = true; // 添加阻尼效果
+            controls.dampingFactor = 0.05;
+            controls.screenSpacePanning = false;
+            controls.minDistance = 100;
+            controls.maxDistance = 1500;
+            controls.maxPolarAngle = Math.PI / 1.5; // 限制垂直旋转角度
+            
+            // 添加环境光
+            const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
+            scene.add(ambientLight);
+
+            // 添加平行光
+            const directionalLight = new THREE.DirectionalLight(0xffffff, 0.8);
+            directionalLight.position.set(1, 1, 1);
+            scene.add(directionalLight);
+
+            // 创建货车车厢
+            createTruckContainer();
+
+            // 添加随机货物
+            if (items.length === 0) { // 只在初始化时添加随机货物
+                setTimeout(generateRandomItems, 100);
+            } else {
+                setTimeout(repackAllItems, 100); // 如果已有货物，重新打包
+            }
+
+            animate();
+        }
+
+        // 创建货车车厢
+        function createTruckContainer() {
+            const containerGeometry = new THREE.BoxGeometry(CONTAINER_WIDTH, CONTAINER_HEIGHT, CONTAINER_LENGTH);
+            const wireframeMaterial = new THREE.MeshBasicMaterial({
+                color: 0x808080,
+                wireframe: true,
+                linewidth: 2
+            });
+            container = new THREE.Mesh(containerGeometry, wireframeMaterial);
+            container.position.set(0, CONTAINER_HEIGHT/2, 0);
+            scene.add(container);
+        }
+
+        // 添加货物
+        function addItem() {
+            const length = Number(document.getElementById('length').value);
+            const width = Number(document.getElementById('width').value);
+            const height = Number(document.getElementById('height').value);
+
+            if (!length || !width || !height) {
+                alert('请填写完整的货物尺寸信息！');
+                return;
+            }
+
+            const item = {
+                length: length,
+                width: width,
+                height: height,
+                id: Date.now()
+            };
+            
+            latestItemId = item.id; // 记录最新添加的货物ID
+            items.push(item);
+            repackAllItems(); // 重新打包所有物品
+            clearInputs();
+        }
+
+        // 更新车厢尺寸
+        function updateContainer() {
+            const newLength = Number(document.getElementById('containerLength').value);
+            const newWidth = Number(document.getElementById('containerWidth').value);
+            const newHeight = Number(document.getElementById('containerHeight').value);
+
+            if (!newLength || !newWidth || !newHeight) {
+                alert('请填写完整的车厢尺寸信息！');
+                return;
+            }
+
+            // 清空所有货物
+            while(scene.children.length > 0) {
+                scene.remove(scene.children[0]);
+            }
+            items = [];
+            occupiedSpaces = [];
+            itemMeshes = [];
+
+            CONTAINER_LENGTH = newLength;
+            CONTAINER_WIDTH = newWidth;
+            CONTAINER_HEIGHT = newHeight;
+
+            // 重新创建场景
+            scene = new THREE.Scene();
+            init();
+        }
+
+        // 动画循环
+        function animate() {
+            requestAnimationFrame(animate);
+            controls.update(); // 更新控制器
+            renderer.render(scene, camera);
+        }
+
+        // 检查位置是否有重叠
+        function checkCollision(newItem, position) {
+            const itemBounds = {
+                minX: position.x - newItem.width / 2,
+                maxX: position.x + newItem.width / 2,
+                minY: position.y - newItem.height / 2,
+                maxY: position.y + newItem.height / 2,
+                minZ: position.z - newItem.length / 2,
+                maxZ: position.z + newItem.length / 2
+            };
+
+            for (const space of occupiedSpaces) {
+                if (!(itemBounds.maxX < space.minX || itemBounds.minX > space.maxX ||
+                    itemBounds.maxY < space.minY || itemBounds.minY > space.maxY ||
+                    itemBounds.maxZ < space.minZ || itemBounds.minZ > space.maxZ)) {
+                    return true; // 有重叠
+                }
+            }
+
+            // 检查是否超出车厢范围
+            if (itemBounds.maxX > CONTAINER_WIDTH/2 || itemBounds.minX < -CONTAINER_WIDTH/2 ||
+                itemBounds.maxY > CONTAINER_HEIGHT || itemBounds.minY < 0 ||
+                itemBounds.maxZ > CONTAINER_LENGTH/2 || itemBounds.minZ < -CONTAINER_LENGTH/2) {
+                return true;
+            }
+
+            return false; // 无重叠
+        }
+
+        // 找到合适的放置位置
+        function findPlacement(item) {
+            let bestPosition = null;
+            let maxZ = -Infinity; // 跟踪最靠里的位置
+
+            // 首先尝试放在现有物品顶部，优先选择靠里的位置
+            for (const space of occupiedSpaces) {
+                const y = space.maxY;
+                const x = (space.minX + space.maxX) / 2;
+                const z = (space.minZ + space.maxZ) / 2;
+                
+                const position = { x, y: y + item.height/2, z };
+                // 如果可以放置，且位置比之前找到的更靠里（z更小）
+                if (!checkCollision(item, position) && z < maxZ + item.length) {
+                    bestPosition = position;
+                    maxZ = z;
+                }
+            }
+
+            // 如果无法放在顶部，从后往前搜索地面位置
+            if (!bestPosition) {
+                // 从最靠里的位置开始搜索
+                for (let z = -CONTAINER_LENGTH/2 + item.length/2; z <= CONTAINER_LENGTH/2 - item.length/2; z += 1) {
+                    if (bestPosition) break; // 找到位置就停止搜索
+                    for (let x = -CONTAINER_WIDTH/2 + item.width/2; x <= CONTAINER_WIDTH/2 - item.width/2; x += 1) {
+                        const position = { x, y: item.height/2, z };
+                        if (!checkCollision(item, position)) {
+                            bestPosition = position;
+                            break;
+                        }
+                    }
+                }
+            }
+
+            if (bestPosition) {
+                occupiedSpaces.push({
+                    minX: Math.floor(bestPosition.x - item.width/2),
+                    maxX: Math.ceil(bestPosition.x + item.width/2),
+                    minY: Math.floor(bestPosition.y - item.height/2),
+                    maxY: Math.ceil(bestPosition.y + item.height/2),
+                    minZ: Math.floor(bestPosition.z - item.length/2),
+                    maxZ: Math.ceil(bestPosition.z + item.length/2)
+                });
+            }
+
+            return bestPosition;
+        }
+
+        // 可视化货物
+        function visualizeItem(item) {
+            const geometry = new THREE.BoxGeometry(item.width, item.height, item.length);
+            // 使用货物ID生成固定的颜色
+            const hue = (item.id % 100000) / 100000;  // 将ID转换为0-1之间的值
+            const color = new THREE.Color().setHSL(hue, 0.7, 0.5);
+            
+            // 为最新添加的货物创建特殊材质
+            const material = new THREE.MeshPhongMaterial({
+                color: color,
+                opacity: item.id === latestItemId ? 1 : 0.8,
+                transparent: true,
+                emissive: item.id === latestItemId ? 0x444444 : 0x000000, // 添加发光效果
+                emissiveIntensity: item.id === latestItemId ? 0.5 : 0
+            });
+            const cube = new THREE.Mesh(geometry, material);
+            
+            // 寻找合适的放置位置
+            const position = findPlacement(item);
+            if (position) {
+                cube.position.set(position.x, position.y, position.z);
+                scene.add(cube);
+                itemMeshes.push(cube);
+                return true;
+            }
+            return false;
+        }
+
+        // 更新货物列表显示
+        function updateItemsList() {
+            const itemsList = document.getElementById('itemsList');
+            itemsList.innerHTML = '<h3>已添加货物列表</h3>';
+            
+            // 重新排序items数组，将最新添加的放在前面
+            const sortedItems = [...items].sort((a, b) => b.id - a.id);
+            
+            sortedItems.forEach(item => {
+                const itemCard = document.createElement('div');
+                itemCard.className = 'item-card';
+                if (item.id === latestItemId) {
+                    itemCard.style.border = '2px solid #4CAF50';
+                    itemCard.style.backgroundColor = '#f0fff0';
+                }
+                itemCard.innerHTML = `
+                    ${item.id === latestItemId ? '【新】' : ''}货物 #${item.id}:
+                    长${item.length}cm x 
+                    宽${item.width}cm x 
+                    高${item.height}cm
+                `;
+                itemsList.appendChild(itemCard);
+            });
+        }
+
+        // 清空输入框
+        function clearInputs() {
+            document.getElementById('length').value = '';
+            document.getElementById('width').value = '';
+            document.getElementById('height').value = '';
+        }
+
+        // 窗口大小调整处理
+        window.addEventListener('resize', onWindowResize, false);
+
+        function onWindowResize() {
+            const containerElement = document.getElementById('canvas-container');
+            camera.aspect = containerElement.clientWidth / containerElement.clientHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(containerElement.clientWidth, containerElement.clientHeight);
+            controls.update(); // 窗口调整时更新控制器
+        }
+
+        // 初始化场景
+        init();
+    </script>
+</body>
+</html>
